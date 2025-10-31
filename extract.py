@@ -1,5 +1,6 @@
 """
 Extract Item 1A Risk Factors from 10-K HTML files
+IMPROVED VERSION - Finds all matches and selects the correct section heading
 """
 
 import os
@@ -19,38 +20,147 @@ def clean_text(text):
     return text
 
 
-def find_item1a_start(soup):
+def score_candidate(element, text, soup):
     """
-    Find the start of Item 1A Risk Factors section
-    Returns the element where Item 1A starts
+    Score a potential Item 1A heading candidate.
+    Higher score = more likely to be the actual section heading.
+    Returns (score, element)
     """
-    # Patterns to match Item 1A headings
+    score = 0
+
+    # Check element's own text
+    element_text = element.get_text(strip=True)
+
+    # Bonus points for being a standalone element (text matches closely)
+    if len(element_text) <= len(text) + 15:
+        score += 50
+
+    # Bonus for being in a heading tag
+    if element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+        score += 30
+
+    # Bonus for being in a paragraph (common for 10-K headings)
+    if element.name in ['p', 'div']:
+        score += 20
+
+    # Penalty for being nested in inline formatting
+    if element.name in ['b', 'strong', 'span', 'i', 'em']:
+        score -= 20
+
+    # Check for reference indicators in element or parent
+    reference_indicators = [
+        'described in', 'see', 'refer to', 'factors in', 'included in',
+        'discussed in', 'contained in', 'set forth in', 'presented in',
+        'disclosed in', 'other factors', 'additional information',
+        'for more information', 'as described in', 'further discussed in',
+        'more fully described', 'conjunction with', 'forward-looking',
+        'annual report on form'
+    ]
+
+    # Check element text for reference indicators
+    element_lower = element_text.lower()
+    if any(indicator in element_lower for indicator in reference_indicators):
+        score -= 100  # Heavy penalty
+
+    # Check parent text (if parent is small enough to be a single paragraph)
+    parent = element.parent
+    if parent:
+        parent_text = parent.get_text(strip=True)
+        if len(parent_text) < 500:  # Only check if parent is reasonably sized
+            parent_lower = parent_text.lower()
+            if any(indicator in parent_lower for indicator in reference_indicators):
+                score -= 80
+
+    # Check what comes AFTER this element - real headings have risk factor content after them
+    next_content = []
+    current = element.find_next()
+    chars_collected = 0
+    count = 0
+
+    while current and count < 20 and chars_collected < 2000:
+        if current.name in ['p', 'div', 'span', 'td']:
+            next_text = current.get_text(strip=True)
+            if next_text and len(next_text) > 10:
+                next_content.append(next_text)
+                chars_collected += len(next_text)
+        current = current.find_next()
+        count += 1
+
+    combined_next = ' '.join(next_content).lower()
+
+    # Check for risk factor keywords in following content
+    risk_keywords = ['risk', 'uncertain', 'could', 'may', 'might',
+                     'adverse', 'factor', 'subject to', 'depend', 'fail']
+    risk_count = sum(
+        1 for keyword in risk_keywords if keyword in combined_next)
+    score += risk_count * 5  # Bonus for each risk keyword
+
+    # Bonus for substantial content following
+    if chars_collected > 1000:
+        score += 30
+    elif chars_collected > 500:
+        score += 15
+
+    # Check if next major item section appears (Item 1B, Item 2)
+    # This validates we're in the right place in the document
+    next_item_patterns = [
+        r'\bITEM\s*1B\b',
+        r'\bItem\s*1B\b',
+        r'\bITEM\s*2\b',
+        r'\bItem\s*2\b',
+    ]
+
+    if any(re.search(pattern, combined_next, re.IGNORECASE) for pattern in next_item_patterns):
+        score += 20  # Bonus for having next section marker
+
+    return score
+
+
+def find_all_item1a_candidates(soup):
+    """
+    Find ALL potential Item 1A heading matches and score them.
+    Returns list of (score, element) tuples sorted by score.
+    """
     patterns = [
         r'^\s*ITEM\s*1A\.?\s*RISK\s*FACTORS\.?\s*$',
         r'^\s*Item\s*1A\.?\s*Risk\s*Factors\.?\s*$',
-        r'^\s*ITEM\s*1A\s*$',
-        r'^\s*Item\s*1A\s*$',
     ]
 
-    # Search through all text elements
-    for element in soup.find_all(['p', 'div', 'span', 'td', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+    candidates = []
+
+    # Search through relevant elements
+    for element in soup.find_all(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'td']):
         text = element.get_text(strip=True)
 
         # Check if this matches any pattern
         for pattern in patterns:
             if re.match(pattern, text, re.IGNORECASE):
-                # Make sure this is not just a table of contents reference
-                # Check if there's substantive content following
-                next_elements = []
-                current = element.find_next()
-                count = 0
-                while current and count < 10:
-                    if current.name in ['p', 'div', 'span', 'td']:
-                        next_text = current.get_text(strip=True)
-                        if next_text and len(next_text) > 50:  # Substantive text
-                            return element
-                    current = current.find_next()
-                    count += 1
+                score = score_candidate(element, text, soup)
+                candidates.append((score, element, text))
+                break  # Don't double-count
+
+    # Sort by score (highest first)
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    return candidates
+
+
+def find_item1a_start(soup):
+    """
+    Find the start of Item 1A Risk Factors section by finding all candidates
+    and selecting the best one.
+    """
+    candidates = find_all_item1a_candidates(soup)
+
+    if not candidates:
+        return None
+
+    # Return the highest-scoring candidate
+    best_score, best_element, best_text = candidates[0]
+
+    # Only accept if score is positive (otherwise even best match is suspicious)
+    if best_score > 0:
+        return best_element
 
     return None
 
@@ -62,8 +172,8 @@ def find_next_major_section(element):
     patterns = [
         r'^\s*ITEM\s*1B',
         r'^\s*Item\s*1B',
-        r'^\s*ITEM\s*2',
-        r'^\s*Item\s*2',
+        r'^\s*ITEM\s*2[^0-9]',
+        r'^\s*Item\s*2[^0-9]',
     ]
 
     current = element
@@ -75,7 +185,7 @@ def find_next_major_section(element):
         if current.name in ['p', 'div', 'span', 'td', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
             text = current.get_text(strip=True)
             for pattern in patterns:
-                if re.match(pattern, text, re.IGNORECASE):
+                if re.search(pattern, text, re.IGNORECASE):
                     return current
 
     return None
