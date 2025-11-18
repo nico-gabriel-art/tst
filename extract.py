@@ -262,6 +262,14 @@ def find_next_major_section(element):
     return None
 
 
+def has_processable_children(element, tag_names):
+    """Check if element has children that are in our processable tag list"""
+    for child in element.descendants:
+        if child != element and hasattr(child, 'name') and child.name in tag_names:
+            return True
+    return False
+
+
 def extract_item1a_content(soup):
     """Extract the content of Item 1A Risk Factors"""
     
@@ -291,6 +299,8 @@ def extract_item1a_content(soup):
     max_iterations = 10000
     iterations = 0
     
+    processable_tags = ['p', 'div', 'span', 'td', 'li']
+    
     while current and current != end_element and iterations < max_iterations:
         iterations += 1
         
@@ -300,7 +310,12 @@ def extract_item1a_content(soup):
             break
         seen_elements.add(element_id)
         
-        if current.name in ['p', 'div', 'span', 'td', 'li']:
+        if current.name in processable_tags:
+            # Skip if this element has processable children (to avoid duplicates)
+            if has_processable_children(current, processable_tags):
+                current = current.find_next()
+                continue
+            
             text = current.get_text(separator=' ', strip=True)
             if text and len(text) > 15:  # Minimum meaningful text length
                 # Skip table of contents indicators
@@ -323,25 +338,35 @@ def split_into_sentences(text):
     """
     Split text into sentences, handling bullet points
     """
-    # Replace bullet points with markers
-    text = re.sub(r'[•·▪■●]', '|||BULLET|||', text)
-    
-    # Split on bullet markers
-    parts = text.split('|||BULLET|||')
+    # Split on bullet points (keep the bullet with the following text)
+    # Match bullet characters followed by text up to the next bullet or sentence end
+    parts = re.split(r'(?=[•·▪■●])', text)
     
     sentences = []
     for part in parts:
-        if not part.strip():
+        part = part.strip()
+        if not part:
             continue
         
-        # Split on sentence endings
-        sentence_endings = re.split(
-            r'(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])$', part)
+        # Check if this part starts with a bullet
+        bullet_match = re.match(r'^([•·▪■●])\s*(.+)', part, re.DOTALL)
         
-        for sent in sentence_endings:
-            sent = sent.strip()
-            if sent and len(sent) > 3:
-                sentences.append(sent)
+        if bullet_match:
+            # This is a bullet point - treat the entire bullet point as one item
+            bullet_char = bullet_match.group(1)
+            bullet_text = bullet_match.group(2).strip()
+            
+            if bullet_text and len(bullet_text) > 3:
+                # Keep the bullet character with its text
+                sentences.append(bullet_char + ' ' + bullet_text)
+        else:
+            # Regular text without bullet - split on sentence endings
+            sentence_endings = re.split(r'(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])$', part)
+            
+            for sent in sentence_endings:
+                sent = sent.strip()
+                if sent and len(sent) > 3:
+                    sentences.append(sent)
     
     return sentences
 
